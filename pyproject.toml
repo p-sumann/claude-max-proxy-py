@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-max-proxy-py"
+version = "0.1.1"
+description = "OpenAI-compatible API proxy for Claude Max. Wraps Claude Code CLI — zero API keys needed."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Suman Paudel", email = "dastonsuman1997@gmail.com" }]
+keywords = ["claude", "anthropic", "openai", "proxy", "api", "llm", "claude-max"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.0.0",
+    "click>=8.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["ruff", "pytest", "httpx"]
+
+[project.scripts]
+cmappy = "claude_max_proxy.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/p-sumann/claude-max-proxy-py"
+Repository = "https://github.com/p-sumann/claude-max-proxy-py"
+Issues = "https://github.com/p-sumann/claude-max-proxy-py/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claude_max_proxy"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
