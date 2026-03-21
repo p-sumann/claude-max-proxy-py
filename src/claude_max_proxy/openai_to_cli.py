@@ -10,6 +10,13 @@ MODEL_MAP: dict[str, str] = {
     "claude-sonnet-4": "sonnet",
     "claude-sonnet-5": "sonnet",
     "claude-haiku-4": "haiku",
+    # Versioned model names (strands agents proxy mode)
+    "claude-opus-4-6": "opus",
+    "claude-opus-4-5": "opus",
+    "claude-sonnet-4-6": "sonnet",
+    "claude-sonnet-4-5": "sonnet",
+    "claude-haiku-4-5": "haiku",
+    # With provider prefix
     "claude-code-cli/claude-opus-4": "opus",
     "claude-code-cli/claude-sonnet-4": "sonnet",
     "claude-code-cli/claude-sonnet-5": "sonnet",
@@ -32,6 +39,25 @@ def extract_model(model: str) -> str:
     return "opus"
 
 
+def _extract_text(content: Any) -> str:
+    """Extract plain text from message content.
+
+    OpenAI API allows content to be either:
+      - a string: "Hello!"
+      - an array of content blocks: [{"type": "text", "text": "Hello!"}, ...]
+      - None
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            block["text"]
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return str(content) if content is not None else ""
+
+
 def messages_to_prompt(messages: list[dict[str, Any]]) -> str:
     """Flatten OpenAI messages into a single prompt string.
 
@@ -42,7 +68,7 @@ def messages_to_prompt(messages: list[dict[str, Any]]) -> str:
 
     for msg in messages:
         role = msg.get("role", "")
-        content = msg.get("content", "")
+        content = _extract_text(msg.get("content"))
 
         if role == "system":
             parts.append(f"<system>\n{content}\n</system>\n")

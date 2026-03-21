@@ -234,6 +234,7 @@ async def verify_auth() -> dict[str, Any]:
         proc = await asyncio.create_subprocess_exec(
             "claude", "--print", "--model", "haiku",
             "--output-format", "stream-json",
+            "--verbose",
             "--no-session-persistence",
             "say ok",
             stdout=asyncio.subprocess.PIPE,
