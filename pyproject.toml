@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-max-proxy-py"
-version = "0.1.1"
+version = "0.1.2"
 description = "OpenAI-compatible API proxy for Claude Max. Wraps Claude Code CLI — zero API keys needed."
 readme = "README.md"
 license = "MIT"
