@@ -1,4 +1,8 @@
-"""FastAPI server with OpenAI-compatible endpoints."""
+"""FastAPI server with OpenAI-compatible endpoints.
+
+Session-aware: reuses Claude CLI sessions per model tier so that
+Anthropic's prompt cache stays warm across requests.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +20,12 @@ from . import __version__
 from .cli_to_openai import cli_result_to_openai, create_done_chunk
 from .openai_to_cli import openai_to_cli
 from .session_manager import session_manager
-from .subprocess_manager import ClaudeSubprocess
+from .subprocess_manager import (
+    ClaudeSubprocess,
+    get_or_create_session,
+    reset_all_sessions,
+    reset_session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +79,23 @@ def create_app() -> FastAPI:
             "object": "list",
             "data": [
                 {"id": "claude-opus-4", "object": "model", "owned_by": "anthropic", "created": now},
+                {"id": "claude-opus-4-6", "object": "model", "owned_by": "anthropic", "created": now},
+                {"id": "claude-opus-4-5", "object": "model", "owned_by": "anthropic", "created": now},
                 {"id": "claude-sonnet-4", "object": "model", "owned_by": "anthropic", "created": now},
-                {"id": "claude-sonnet-5", "object": "model", "owned_by": "anthropic", "created": now},
+                {"id": "claude-sonnet-4-6", "object": "model", "owned_by": "anthropic", "created": now},
+                {"id": "claude-sonnet-4-5", "object": "model", "owned_by": "anthropic", "created": now},
                 {"id": "claude-haiku-4", "object": "model", "owned_by": "anthropic", "created": now},
+                {"id": "claude-haiku-4-5", "object": "model", "owned_by": "anthropic", "created": now},
             ],
         }
+
+    # ── POST /v1/sessions/reset ─────────────────────────────────────────
+
+    @app.post("/v1/sessions/reset")
+    async def reset_sessions():
+        """Reset all persistent sessions. Call this between pipeline runs."""
+        reset_all_sessions()
+        return {"status": "ok", "message": "All sessions reset"}
 
     # ── POST /v1/chat/completions ───────────────────────────────────────
 
@@ -95,16 +116,26 @@ def create_app() -> FastAPI:
             })
 
         try:
-            cli_input = openai_to_cli(body)
+            # Resolve model first to get session
+            from .openai_to_cli import extract_model
+            model = extract_model(body.get("model", "claude-sonnet-4"))
+
+            # Get or create a persistent session for this model tier.
+            # is_new=True → first call (send full conversation, --session-id)
+            # is_new=False → resumed (send last message only, --resume)
+            cli_session_id, is_new = get_or_create_session(model)
+            is_resumed = not is_new
+
+            cli_input = openai_to_cli(body, is_resumed=is_resumed)
 
             if stream:
                 return StreamingResponse(
-                    _handle_streaming(cli_input, request_id),
+                    _handle_streaming(cli_input, request_id, cli_session_id, is_resumed),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Request-Id": request_id},
                 )
             else:
-                return await _handle_non_streaming(cli_input, request_id)
+                return await _handle_non_streaming(cli_input, request_id, cli_session_id, is_resumed)
 
         except Exception as e:
             logger.error("Error: %s", e)
@@ -114,7 +145,7 @@ def create_app() -> FastAPI:
 
     # ── Streaming ───────────────────────────────────────────────────────
 
-    async def _handle_streaming(cli_input, request_id: str):
+    async def _handle_streaming(cli_input, request_id: str, cli_session_id: str, is_resumed: bool):
         yield ":ok\n\n"
 
         subprocess = ClaudeSubprocess()
@@ -154,10 +185,14 @@ def create_app() -> FastAPI:
 
         def on_error(error):
             logger.error("Stream error: %s", error)
+            # On error, reset the session so next call starts fresh
+            reset_session(cli_input.model)
             queue.put_nowait(("error", str(error)))
 
         def on_close(code: int):
             if not is_complete and code != 0:
+                # Reset session on failure so next call starts clean
+                reset_session(cli_input.model)
                 queue.put_nowait(("error", f"Process exited with code {code}"))
             queue.put_nowait(("done", None))
 
@@ -168,8 +203,23 @@ def create_app() -> FastAPI:
         subprocess.on("close", on_close)
 
         try:
-            await subprocess.start(cli_input.prompt, model=cli_input.model, session_id=cli_input.session_id)
+            if is_resumed:
+                await subprocess.start(
+                    cli_input.prompt,
+                    model=cli_input.model,
+                    resume_session=cli_session_id,
+                    cwd=cli_input.cwd,
+                )
+            else:
+                await subprocess.start(
+                    cli_input.prompt,
+                    model=cli_input.model,
+                    system_prompt=cli_input.system_prompt or None,
+                    session_id=cli_session_id,
+                    cwd=cli_input.cwd,
+                )
         except RuntimeError as e:
+            reset_session(cli_input.model)
             yield f"data: {json.dumps({'error': {'message': str(e), 'type': 'server_error', 'code': 'cli_not_found'}})}\n\n"
             yield "data: [DONE]\n\n"
             return
@@ -177,9 +227,10 @@ def create_app() -> FastAPI:
         done = False
         while not done:
             try:
-                event_type, payload = await asyncio.wait_for(queue.get(), timeout=300)
+                event_type, payload = await asyncio.wait_for(queue.get(), timeout=900)
             except asyncio.TimeoutError:
                 yield f"data: {json.dumps({'error': {'message': 'Stream timeout', 'type': 'server_error', 'code': None}})}\n\n"
+                reset_session(cli_input.model)
                 subprocess.kill()
                 break
 
@@ -193,7 +244,7 @@ def create_app() -> FastAPI:
 
     # ── Non-streaming ───────────────────────────────────────────────────
 
-    async def _handle_non_streaming(cli_input, request_id: str):
+    async def _handle_non_streaming(cli_input, request_id: str, cli_session_id: str, is_resumed: bool):
         subprocess = ClaudeSubprocess()
         result_future: asyncio.Future = asyncio.get_event_loop().create_future()
         final_result: dict | None = None
@@ -206,8 +257,11 @@ def create_app() -> FastAPI:
         def on_error(error):
             nonlocal error_msg
             error_msg = str(error)
+            reset_session(cli_input.model)
 
         def on_close(code: int):
+            if code != 0 and not error_msg:
+                reset_session(cli_input.model)
             if not result_future.done():
                 result_future.set_result(code)
 
@@ -216,8 +270,23 @@ def create_app() -> FastAPI:
         subprocess.on("close", on_close)
 
         try:
-            await subprocess.start(cli_input.prompt, model=cli_input.model, session_id=cli_input.session_id)
+            if is_resumed:
+                await subprocess.start(
+                    cli_input.prompt,
+                    model=cli_input.model,
+                    resume_session=cli_session_id,
+                    cwd=cli_input.cwd,
+                )
+            else:
+                await subprocess.start(
+                    cli_input.prompt,
+                    model=cli_input.model,
+                    system_prompt=cli_input.system_prompt or None,
+                    session_id=cli_session_id,
+                    cwd=cli_input.cwd,
+                )
         except RuntimeError as e:
+            reset_session(cli_input.model)
             return JSONResponse(status_code=500, content={
                 "error": {"message": str(e), "type": "server_error", "code": None}
             })
